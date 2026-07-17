@@ -2,9 +2,9 @@ package com.garnet.camera
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.SurfaceTexture
 import android.os.Bundle
-import android.view.TextureView
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -34,6 +34,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -112,7 +113,6 @@ fun CameraScreen(cameraController: CameraController) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    var textureViewReference by remember { mutableStateOf<TextureView?>(null) }
     var isFlashActive by remember { mutableStateOf(false) }
 
     Box(
@@ -124,38 +124,38 @@ fun CameraScreen(cameraController: CameraController) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                TextureView(ctx).apply {
-                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-                            cameraController.onSurfaceAvailable(surface, width, height)
+                SurfaceView(ctx).apply {
+                    holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
                         }
 
-                        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            cameraController.onSurfaceAvailable(holder.surface, width, height)
+                        }
 
-                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
                             cameraController.onSurfaceDestroyed()
-                            return false
                         }
-
-                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
-                    }
-                    textureViewReference = this
+                    })
                 }
             }
         )
 
         // Shutter Flash Animation Overlay
-        AnimatedVisibility(
-            visible = isFlashActive,
-            enter = fadeIn(animationSpec = tween(50)),
-            exit = fadeOut(animationSpec = tween(150))
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.White)
-            )
-        }
+        val flashAlpha by animateFloatAsState(
+            targetValue = if (isFlashActive) 1f else 0f,
+            animationSpec = tween(durationMillis = if (isFlashActive) 50 else 150),
+            label = "flashAlpha"
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithContent {
+                    if (flashAlpha > 0f) {
+                        drawRect(Color.White, alpha = flashAlpha)
+                    }
+                }
+        )
 
         // Top Glassmorphic Panel
         Box(

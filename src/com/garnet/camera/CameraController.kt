@@ -24,6 +24,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 class CameraController(private val context: Context) {
+    private val ioScope = CoroutineScope(Dispatchers.IO)
+
     companion object {
         private const val TAG = "CameraController"
         const val BACK_WIDE_CAMERA = "0"
@@ -51,7 +53,7 @@ class CameraController(private val context: Context) {
     private val _cameraState = MutableStateFlow<CameraState>(CameraState.Closed)
     val cameraState: StateFlow<CameraState> = _cameraState.asStateFlow()
 
-    private var activeSurfaceTexture: SurfaceTexture? = null
+    private var activeSurface: Surface? = null
     private var lastBackCameraId = BACK_WIDE_CAMERA
 
     sealed interface CameraState {
@@ -63,7 +65,7 @@ class CameraController(private val context: Context) {
 
     fun onResume() {
         startBackgroundThread()
-        if (activeSurfaceTexture != null && _cameraState.value == CameraState.Closed) {
+        if (activeSurface != null && _cameraState.value == CameraState.Closed) {
             openCamera()
         }
     }
@@ -90,13 +92,13 @@ class CameraController(private val context: Context) {
         }
     }
 
-    fun onSurfaceAvailable(texture: SurfaceTexture, width: Int, height: Int) {
-        activeSurfaceTexture = texture
+    fun onSurfaceAvailable(surface: Surface, width: Int, height: Int) {
+        activeSurface = surface
         openCamera()
     }
 
     fun onSurfaceDestroyed() {
-        activeSurfaceTexture = null
+        activeSurface = null
         closeCamera()
     }
 
@@ -122,7 +124,7 @@ class CameraController(private val context: Context) {
     }
 
     private fun openCamera() {
-        val texture = activeSurfaceTexture ?: return
+        val previewSurface = activeSurface ?: return
         val cameraId = _currentCameraId.value
 
         if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -135,7 +137,7 @@ class CameraController(private val context: Context) {
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
-                    createCameraPreview(camera, texture)
+                    createCameraPreview(camera, previewSurface)
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
@@ -154,7 +156,7 @@ class CameraController(private val context: Context) {
         }
     }
 
-    private fun createCameraPreview(camera: CameraDevice, texture: SurfaceTexture) {
+    private fun createCameraPreview(camera: CameraDevice, previewSurface: Surface) {
         try {
             val cameraId = _currentCameraId.value
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
@@ -167,8 +169,6 @@ class CameraController(private val context: Context) {
 
             imageReader = ImageReader.newInstance(largestSize.width, largestSize.height, ImageFormat.JPEG, 2)
 
-            texture.setDefaultBufferSize(1920, 1080)
-            val previewSurface = Surface(texture)
             val readerSurface = imageReader!!.surface
 
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -234,7 +234,7 @@ class CameraController(private val context: Context) {
                 buffer.get(bytes)
                 image.close()
 
-                CoroutineScope(Dispatchers.IO).launch {
+                ioScope.launch {
                     val filename = "IMG_${System.currentTimeMillis()}.jpg"
                     val resolver = context.contentResolver
                     val contentValues = ContentValues().apply {

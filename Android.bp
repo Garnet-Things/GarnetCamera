@@ -27,6 +27,7 @@ android_app {
         "-P plugin:androidx.compose.compiler.plugins.kotlin:sourceInformation=true",
     ],
     optimize: {
-        enabled: false,
+        enabled: true,
+        shrink: true,
     },
 }
