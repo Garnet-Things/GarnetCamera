@@ -1,0 +1,12 @@
+android_app {
+    name: "GarnetCamera",
+    srcs: ["src/**/*.java"],
+    resource_dirs: ["res"],
+    platform_apis: true,
+    certificate: "platform",
+    privileged: true,
+    manifest: "AndroidManifest.xml",
+    optimize: {
+        enabled: false,
+    },
+}
