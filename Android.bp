@@ -1,11 +1,31 @@
 android_app {
     name: "GarnetCamera",
-    srcs: ["src/**/*.java"],
+    srcs: [
+        "src/**/*.kt",
+        "src/**/*.java",
+    ],
     resource_dirs: ["res"],
     platform_apis: true,
     certificate: "platform",
     privileged: true,
     manifest: "AndroidManifest.xml",
+    static_libs: [
+        "androidx.activity_activity-compose",
+        "androidx.compose.animation_animation-core",
+        "androidx.compose.foundation_foundation",
+        "androidx.compose.material3_material3",
+        "androidx.compose.material_material-icons-core",
+        "androidx.compose.material_material-icons-extended",
+        "androidx.compose.runtime_runtime",
+        "androidx.compose.ui_ui",
+        "androidx.lifecycle_lifecycle-viewmodel-compose",
+        "kotlinx-coroutines-core",
+    ],
+    kotlincflags: [
+        "-Xjvm-default=all",
+        "-opt-in=kotlin.RequiresOptIn",
+        "-P plugin:androidx.compose.compiler.plugins.kotlin:sourceInformation=true",
+    ],
     optimize: {
         enabled: false,
     },
