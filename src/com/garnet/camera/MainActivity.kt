@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        cameraController.startBackgroundThread()
+        cameraController.onResume()
     }
 
     override fun onPause() {

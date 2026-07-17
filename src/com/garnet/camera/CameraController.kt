@@ -61,6 +61,13 @@ class CameraController(private val context: Context) {
         data class Error(val message: String) : CameraState
     }
 
+    fun onResume() {
+        startBackgroundThread()
+        if (activeSurfaceTexture != null && _cameraState.value == CameraState.Closed) {
+            openCamera()
+        }
+    }
+
     fun startBackgroundThread() {
         if (backgroundThread == null) {
             backgroundThread = HandlerThread("CameraBackground").apply {
