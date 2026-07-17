@@ -262,10 +262,9 @@ fun CameraScreen(cameraController: CameraController) {
 
                 // Shutter Button
                 ShutterButton(onClick = {
-                    val tv = textureViewReference
-                    if (tv != null && cameraState is CameraState.Active) {
+                    if (cameraState is CameraState.Active) {
                         isFlashActive = true
-                        cameraController.takePhoto(tv) { filename ->
+                        cameraController.takePhoto { filename ->
                             Toast.makeText(context, "Saved: $filename", Toast.LENGTH_SHORT).show()
                         }
                         // Rapid reset of flash overlay

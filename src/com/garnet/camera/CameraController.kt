@@ -4,17 +4,18 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
+import android.media.ImageReader
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Size
 import android.view.Surface
-import android.view.TextureView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +37,7 @@ class CameraController(private val context: Context) {
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var previewRequestBuilder: CaptureRequest.Builder? = null
+    private var imageReader: ImageReader? = null
     
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -147,17 +149,29 @@ class CameraController(private val context: Context) {
 
     private fun createCameraPreview(camera: CameraDevice, texture: SurfaceTexture) {
         try {
+            val cameraId = _currentCameraId.value
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            
+            // Get largest supported JPEG size (MIUI Camera resolution)
+            val largestSize = map?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width * it.height }
+                ?: Size(1920, 1080)
+            Log.d(TAG, "Configuring ImageReader with size: ${largestSize.width}x${largestSize.height}")
+
+            imageReader = ImageReader.newInstance(largestSize.width, largestSize.height, ImageFormat.JPEG, 2)
+
             texture.setDefaultBufferSize(1920, 1080)
-            val surface = Surface(texture)
+            val previewSurface = Surface(texture)
+            val readerSurface = imageReader!!.surface
 
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(surface)
+                addTarget(previewSurface)
                 // Disable ZSL as required by vendor configs
                 set(CaptureRequest.CONTROL_ENABLE_ZSL, false)
             }
             previewRequestBuilder = builder
 
-            camera.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
+            camera.createCaptureSession(listOf(previewSurface, readerSurface), object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     if (cameraDevice == null) return
                     captureSession = session
@@ -188,46 +202,71 @@ class CameraController(private val context: Context) {
         captureSession = null
         cameraDevice?.close()
         cameraDevice = null
+        imageReader?.close()
+        imageReader = null
         _cameraState.value = CameraState.Closed
     }
 
-    fun takePhoto(textureView: TextureView, onPhotoSaved: (String) -> Unit) {
-        val bitmap = textureView.bitmap ?: return
-        
-        CoroutineScope(Dispatchers.IO).launch {
-            val filename = "IMG_${System.currentTimeMillis()}.jpg"
-            val resolver = context.contentResolver
-            val contentValues = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/GarnetCamera")
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
+    fun takePhoto(onPhotoSaved: (String) -> Unit) {
+        val device = cameraDevice ?: return
+        val session = captureSession ?: return
+        val reader = imageReader ?: return
+
+        try {
+            val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                addTarget(reader.surface)
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_ENABLE_ZSL, false)
             }
 
-            val imageUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-            if (imageUri != null) {
-                try {
-                    resolver.openOutputStream(imageUri).use { outputStream ->
-                        if (outputStream != null) {
-                            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream)
+            reader.setOnImageAvailableListener({ reader ->
+                val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                val buffer = image.planes[0].buffer
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
+                image.close()
+
+                CoroutineScope(Dispatchers.IO).launch {
+                    val filename = "IMG_${System.currentTimeMillis()}.jpg"
+                    val resolver = context.contentResolver
+                    val contentValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/GarnetCamera")
+                            put(MediaStore.MediaColumns.IS_PENDING, 1)
                         }
                     }
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        contentValues.clear()
-                        contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                        resolver.update(imageUri, contentValues, null, null)
-                    }
+                    val imageUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                    if (imageUri != null) {
+                        try {
+                            resolver.openOutputStream(imageUri).use { outputStream ->
+                                if (outputStream != null) {
+                                    outputStream.write(bytes)
+                                }
+                            }
 
-                    CoroutineScope(Dispatchers.Main).launch {
-                        onPhotoSaved(filename)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                contentValues.clear()
+                                contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                                resolver.update(imageUri, contentValues, null, null)
+                            }
+
+                            CoroutineScope(Dispatchers.Main).launch {
+                                onPhotoSaved(filename)
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to write photo bytes", e)
+                        }
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to save photo", e)
                 }
-            }
+            }, backgroundHandler)
+
+            session.capture(captureBuilder.build(), null, backgroundHandler)
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "Failed to capture still image", e)
         }
     }
 }
