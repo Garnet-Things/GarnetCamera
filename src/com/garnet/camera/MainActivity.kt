@@ -2,9 +2,9 @@ package com.garnet.camera
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
 import android.os.Bundle
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.TextureView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -39,10 +39,13 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.garnet.camera.CameraController.CameraState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -53,6 +56,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraController: CameraController
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
         cameraController = CameraController(this)
 
@@ -111,105 +115,130 @@ fun CameraScreen(cameraController: CameraController) {
     val isFrontCamera by cameraController.isFrontCamera.collectAsState()
     val cameraState by cameraController.cameraState.collectAsState()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
 
+    var textureViewReference by remember { mutableStateOf<TextureView?>(null) }
     var isFlashActive by remember { mutableStateOf(false) }
+    var isAppActive by remember { mutableStateOf(true) }
 
-    Box(
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                isAppActive = false
+            } else if (event == Lifecycle.Event.ON_RESUME) {
+                isAppActive = true
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Camera Preview
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                SurfaceView(ctx).apply {
-                    holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {
-                        }
-
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                            cameraController.onSurfaceAvailable(holder.surface, width, height)
-                        }
-
-                        override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            cameraController.onSurfaceDestroyed()
-                        }
-                    })
-                }
-            }
-        )
-
-        // Shutter Flash Animation Overlay
-        val flashAlpha by animateFloatAsState(
-            targetValue = if (isFlashActive) 1f else 0f,
-            animationSpec = tween(durationMillis = if (isFlashActive) 50 else 150),
-            label = "flashAlpha"
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .drawWithContent {
-                    if (flashAlpha > 0f) {
-                        drawRect(Color.White, alpha = flashAlpha)
-                    }
-                }
-        )
-
-        // Top Glassmorphic Panel
+        // Camera Preview Area (Top) - Fixed 3:4 aspect ratio
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 24.dp, vertical = 16.dp)
+                .aspectRatio(3f / 4f)
+                .background(Color.Black)
         ) {
-            Row(
+            // Camera Preview
+            if (isAppActive) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        TextureView(ctx).apply {
+                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                                    cameraController.onSurfaceAvailable(surface, width, height)
+                                }
+
+                                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+
+                                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                    cameraController.onSurfaceDestroyed()
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+                            }
+                            textureViewReference = this
+                        }
+                    }
+                )
+            }
+
+            // Shutter Flash Animation Overlay
+            val flashAlpha by animateFloatAsState(
+                targetValue = if (isFlashActive) 1f else 0f,
+                animationSpec = tween(durationMillis = if (isFlashActive) 50 else 150),
+                label = "flashAlpha"
+            )
+            Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .align(Alignment.CenterStart),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .fillMaxSize()
+                    .drawWithContent {
+                        if (flashAlpha > 0f) {
+                            drawRect(Color.White, alpha = flashAlpha)
+                        }
+                    }
+            )
+
+            // Top Glassmorphic Panel
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 24.dp, vertical = 16.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.CameraAlt,
-                    contentDescription = "Camera ID",
-                    tint = Color.White.copy(alpha = 0.8f),
-                    modifier = Modifier.size(16.dp)
-                )
-                Text(
-                    text = when {
-                        cameraState is CameraState.Opening -> "Opening..."
-                        cameraState is CameraState.Error -> "Error"
-                        isFrontCamera -> "Front Camera"
-                        currentCameraId == CameraController.BACK_MACRO_CAMERA -> "Macro Lens"
-                        currentCameraId == CameraController.BACK_UW_CAMERA -> "Ultra-Wide Lens"
-                        else -> "Wide Lens"
-                    },
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .align(Alignment.CenterStart),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CameraAlt,
+                        contentDescription = "Camera ID",
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = when {
+                            cameraState is CameraState.Opening -> "Opening..."
+                            cameraState is CameraState.Error -> "Error"
+                            isFrontCamera -> "Front Camera"
+                            currentCameraId == CameraController.BACK_MACRO_CAMERA -> "Macro Lens"
+                            currentCameraId == CameraController.BACK_UW_CAMERA -> "Ultra-Wide Lens"
+                            else -> "Wide Lens"
+                        },
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
         }
 
-        // Bottom Controls Container (Lens switcher + Shutter + Flip)
+        // Bottom Controls Container (Takes remaining space)
         Column(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
+                .weight(1f)
                 .fillMaxWidth()
-                .background(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))
-                    )
-                )
-                .padding(bottom = 36.dp, top = 24.dp),
+                .navigationBarsPadding()
+                .padding(vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(24.dp)
+            verticalArrangement = Arrangement.SpaceEvenly
         ) {
             // Lens Switcher (Only visible for Back Cameras)
             AnimatedVisibility(
@@ -222,7 +251,7 @@ fun CameraScreen(cameraController: CameraController) {
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .clip(RoundedCornerShape(32.dp))
-                        .background(Color.Black.copy(alpha = 0.5f))
+                        .background(Color.White.copy(alpha = 0.1f))
                         .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(32.dp))
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {

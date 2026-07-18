@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
 import android.media.ImageReader
 import android.os.Build
 import android.os.Environment
@@ -53,7 +55,7 @@ class CameraController(private val context: Context) {
     private val _cameraState = MutableStateFlow<CameraState>(CameraState.Closed)
     val cameraState: StateFlow<CameraState> = _cameraState.asStateFlow()
 
-    private var activeSurface: Surface? = null
+    private var activeSurfaceTexture: SurfaceTexture? = null
     private var lastBackCameraId = BACK_WIDE_CAMERA
 
     sealed interface CameraState {
@@ -65,7 +67,8 @@ class CameraController(private val context: Context) {
 
     fun onResume() {
         startBackgroundThread()
-        if (activeSurface != null && _cameraState.value == CameraState.Closed) {
+        Log.d(TAG, "onResume called. activeSurfaceTexture=$activeSurfaceTexture, state=${_cameraState.value}")
+        if (activeSurfaceTexture != null && _cameraState.value == CameraState.Closed) {
             openCamera()
         }
     }
@@ -92,13 +95,13 @@ class CameraController(private val context: Context) {
         }
     }
 
-    fun onSurfaceAvailable(surface: Surface, width: Int, height: Int) {
-        activeSurface = surface
+    fun onSurfaceAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+        activeSurfaceTexture = texture
         openCamera()
     }
 
     fun onSurfaceDestroyed() {
-        activeSurface = null
+        activeSurfaceTexture = null
         closeCamera()
     }
 
@@ -124,7 +127,10 @@ class CameraController(private val context: Context) {
     }
 
     private fun openCamera() {
-        val previewSurface = activeSurface ?: return
+        if (_cameraState.value == CameraState.Opening || _cameraState.value == CameraState.Active) {
+            return
+        }
+        val texture = activeSurfaceTexture ?: return
         val cameraId = _currentCameraId.value
 
         if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -137,7 +143,7 @@ class CameraController(private val context: Context) {
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
-                    createCameraPreview(camera, previewSurface)
+                    createCameraPreview(camera, texture)
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
@@ -156,19 +162,25 @@ class CameraController(private val context: Context) {
         }
     }
 
-    private fun createCameraPreview(camera: CameraDevice, previewSurface: Surface) {
+    private fun createCameraPreview(camera: CameraDevice, texture: SurfaceTexture) {
         try {
             val cameraId = _currentCameraId.value
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            
-            // Get largest supported JPEG size (MIUI Camera resolution)
-            val largestSize = map?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width * it.height }
+            val sizes = map?.getOutputSizes(ImageFormat.JPEG)
+            // Filter for 4:3 (or 3:4) aspect ratios to avoid HAL stretching the image
+            val largestSize = sizes?.filter { size ->
+                val ratio = size.width.toFloat() / size.height.toFloat()
+                Math.abs(ratio - (4f / 3f)) < 0.05f || Math.abs(ratio - (3f / 4f)) < 0.05f
+            }?.maxByOrNull { it.width * it.height }
+                ?: sizes?.maxByOrNull { it.width * it.height }
                 ?: Size(1920, 1080)
             Log.d(TAG, "Configuring ImageReader with size: ${largestSize.width}x${largestSize.height}")
 
             imageReader = ImageReader.newInstance(largestSize.width, largestSize.height, ImageFormat.JPEG, 2)
 
+            texture.setDefaultBufferSize(1920, 1080)
+            val previewSurface = Surface(texture)
             val readerSurface = imageReader!!.surface
 
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -178,26 +190,33 @@ class CameraController(private val context: Context) {
             }
             previewRequestBuilder = builder
 
-            camera.createCaptureSession(listOf(previewSurface, readerSurface), object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(session: CameraCaptureSession) {
-                    if (cameraDevice == null) return
-                    captureSession = session
-                    
-                    builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-                    try {
-                        session.setRepeatingRequest(builder.build(), null, backgroundHandler)
-                        _cameraState.value = CameraState.Active
-                    } catch (e: CameraAccessException) {
-                        Log.e(TAG, "Failed to start repeating request", e)
-                        _cameraState.value = CameraState.Error("Failed repeating request")
+            val executor = java.util.concurrent.Executor { command -> backgroundHandler?.post(command) }
+            val sessionConfig = SessionConfiguration(
+                SessionConfiguration.SESSION_REGULAR,
+                listOf(OutputConfiguration(previewSurface), OutputConfiguration(readerSurface)),
+                executor,
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        if (cameraDevice == null) return
+                        captureSession = session
+                        
+                        builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                        try {
+                            session.setRepeatingRequest(builder.build(), null, backgroundHandler)
+                            _cameraState.value = CameraState.Active
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "Failed to start repeating request", e)
+                            _cameraState.value = CameraState.Error("Failed repeating request")
+                        }
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        Log.e(TAG, "Session configuration failed")
+                        _cameraState.value = CameraState.Error("Session configuration failed")
                     }
                 }
-
-                override fun onConfigureFailed(session: CameraCaptureSession) {
-                    Log.e(TAG, "Session configuration failed")
-                    _cameraState.value = CameraState.Error("Session configuration failed")
-                }
-            }, null)
+            )
+            camera.createCaptureSession(sessionConfig)
         } catch (e: CameraAccessException) {
             Log.e(TAG, "Failed to configure camera preview", e)
             _cameraState.value = CameraState.Error("Failed to configure preview: ${e.message}")
